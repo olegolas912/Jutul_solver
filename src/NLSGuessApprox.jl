@@ -1,6 +1,6 @@
 abstract type NonLinearSolver end
 
-# Тип селектора временных шагов (пример; должен быть определён в вашем коде)
+# Тип селектора временных шагов (исправить)
 struct SimpleTimeStepSelector
     firstRampupStepRelative::Real
     firstRampupStep::Real
