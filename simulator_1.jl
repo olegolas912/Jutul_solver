@@ -534,7 +534,7 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
         guess = linear_state_combination(hist, w)
 
         last_state = hist[end]
-        key = :p
+        key = :pressure
         if haskey(last_state, key)
             Δ = norm(guess[key] .- last_state[key]) / (norm(last_state[key]) + eps())
             @info "Initial‑guess diff for $(key) = $(round(Δ, sigdigits = 4))"
