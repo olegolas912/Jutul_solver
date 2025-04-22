@@ -13,13 +13,16 @@ include("optimization.jl")
 include("relaxation.jl")
 include("helper.jl")
 
-function simulator_storage(model; state0 = nothing,
-                                parameters = setup_parameters(model),
-                                copy_state = true,
-                                mode = :forward,
-                                specialize = false,
-                                prepare_step_handler = missing,
-                                kwarg...)
+function simulator_storage(model;
+        state0 = nothing,
+        parameters = setup_parameters(model),
+        copy_state = true,
+        check = true,
+        mode = :forward,
+        specialize = false,
+        prepare_step_handler = missing,
+        kwarg...
+    )
     if mode == :forward
         state_ad = true
         state0_ad = false
@@ -31,15 +34,13 @@ function simulator_storage(model; state0 = nothing,
         state0_ad = true
         @assert mode == :sensitivities
     end
+    if check
+        check_output_variables(model)
+    end
     # We need to sort the secondary variables according to their dependency ordering before simulating.
     sort_secondary_variables!(model)
     @tic "state0" if isnothing(state0)
         state0 = setup_state(model)
-        for (key, value) in state0
-            if isa(value, Number)
-                state0[key] = value + 0.1
-            end
-        end
     elseif copy_state
         # Take a deep copy to avoid side effects.
         state0 = deepcopy(state0)
@@ -47,6 +48,12 @@ function simulator_storage(model; state0 = nothing,
     @tic "storage" storage = setup_storage(model, state0 = state0, parameters = parameters, state0_ad = state0_ad, state_ad = state_ad)
     # Add internal book keeping of time steps
     storage[:recorder] = ProgressRecorder()
+
+    #-----------------------------------------------------------------------
+    storage[:ministates] = Vector{Dict{Symbol,Any}}()   #Added buffer for ministeps
+    const MAX_MINISTEP_HISTORY = 3                      
+    #-----------------------------------------------------------------------
+    
     # Initialize for first time usage
     @tic "init_storage" begin
         initialize_storage!(storage, model; kwarg...)
@@ -57,8 +64,6 @@ function simulator_storage(model; state0 = nothing,
     end
     # We convert the mutable storage (currently Dict) to immutable (NamedTuple)
     # This allows for much faster lookup in the simulation itself.
-
-
     return specialize_simulator_storage(storage, model, specialize)
 end
 
@@ -160,7 +165,6 @@ function simulate!(sim::JutulSimulator, timesteps::AbstractVector;
     )
     rec = progress_recorder(sim)
     # Reset recorder just in case since we are starting a new simulation
-    println("-----------------------------------C:/Users/Oleg/.julia/packages/Jutul/4EUEx/src/simulator/simulator.jl/simulate!-------------------------------------------------------------------------")
     reset!(rec)
     forces, forces_per_step = preprocess_forces(sim, forces)
     start_timestamp = now()
@@ -414,7 +418,7 @@ function perform_step_check_convergence_impl!(report, prev_report, storage, mode
     converged = false
     e = NaN
     t_conv = @elapsed begin
-        if iteration == config[:max_nonlinear_iterations]
+        if iteration == config[:max_nonlinear_iterations]+1
             tf = config[:tol_factor_final_iteration]
         else
             tf = 1
@@ -523,6 +527,26 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
     t_prepare = @elapsed if prepare
         update_before_step!(sim, dt, forces, time = cur_time, recorder = rec, update_explicit = update_explicit)
     end
+    #-----------------------------------------------------------------------
+    hist = sim.storage[:ministates]
+    if length(hist) == MAX_MINISTEP_HISTORY
+        w = [0, 0, 1];  w ./= sum(w) #Weights
+        guess = linear_state_combination(hist, w)
+
+        last_state = hist[end]
+        key = :Pressure
+        if haskey(last_state, key)
+            Δ = norm(guess[key] .- last_state[key]) / (norm(last_state[key]) + eps())
+            println("*** Initial‑guess Δ(", key, ") = ", round(Δ, sigdigits = 4))
+        end
+
+        reset_variables!(sim, guess; type = :state)
+        reset_variables!(sim, guess; type = :previous_state)
+        update_secondary_variables!(sim.storage, sim.model)
+    end
+
+    #-----------------------------------------------------------------------
+    
     step_report = missing
     for it = 1:(max_iter+1)
         do_solve = it <= max_iter
@@ -568,7 +592,17 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
             reset_state_to_previous_state!(sim)
         end
     end
-
+    #-----------------------------------------------------------------------
+        if done
+            push!(sim.storage[:ministates],
+                deepcopy(get_output_state(sim.storage, sim.model)))
+            if length(sim.storage[:ministates]) > MAX_MINISTEP_HISTORY
+                popfirst!(sim.storage[:ministates])
+            end
+            println("*** Ministate buffer size = ",length(sim.storage[:ministates]))
+        end
+    #-----------------------------------------------------------------------
+    
     return (done, report)
 end
 
@@ -800,4 +834,21 @@ function prepare_step!(storage, model, dt, forces, config, ::Missing;
         relaxation = 1.0
     )
     return (nothing, forces)
+end
+
+function linear_state_combination(states::Vector{Dict{Symbol,Any}}, w::AbstractVector)
+    @assert length(states) == length(w)
+    out = Dict{Symbol,Any}()
+    for k in keys(states[1])
+        v1 = states[1][k]
+        if !(v1 isa Number || v1 isa AbstractArray)
+            continue
+        end
+        acc = zero(v1) .* 0
+        for (s, α) in zip(states, w)
+            acc .+= α .* s[k]
+        end
+        out[k] = acc
+    end
+    return out
 end
