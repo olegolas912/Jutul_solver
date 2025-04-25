@@ -13,6 +13,8 @@ include("optimization.jl")
 include("relaxation.jl")
 include("helper.jl")
 
+const MAX_MINISTEP_HISTORY = 3      
+
 function simulator_storage(model;
         state0 = nothing,
         parameters = setup_parameters(model),
@@ -50,8 +52,7 @@ function simulator_storage(model;
     storage[:recorder] = ProgressRecorder()
 
     #-----------------------------------------------------------------------
-    storage[:ministates] = Vector{Dict{Symbol,Any}}()   #Added buffer for ministeps
-    const MAX_MINISTEP_HISTORY = 3                      
+    storage[:ministates] = Vector{Dict{Symbol,Any}}()   #Added buffer for ministeps                
     #-----------------------------------------------------------------------
     
     # Initialize for first time usage
@@ -529,19 +530,27 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
     end
     #-----------------------------------------------------------------------
     hist = sim.storage[:ministates]
+    @info "*** DBG *** entering solve_ministep, hist=$(length(hist))"
     if length(hist) == MAX_MINISTEP_HISTORY
-        w = [0, 0, 1];  w ./= sum(w) #Weights
+        @info "*** DBG *** using linear combination for initial guess"
+        w = collect(0:length(hist)-1); w ./= sum(w) #Weights
         guess = linear_state_combination(hist, w)
 
         last_state = hist[end]
-        key = :pressure
+        key = :Pressure
         if haskey(last_state, key)
             Δ = norm(guess[key] .- last_state[key]) / (norm(last_state[key]) + eps())
-            @info "Initial‑guess diff for $(key) = $(round(Δ, sigdigits = 4))"
+            println("*** Initial‑guess Δ(", key, ") = ", round(Δ, sigdigits = 4))
         end
 
         reset_variables!(sim, guess; type = :state)
         reset_variables!(sim, guess; type = :previous_state)
+        if length(hist) == MAX_MINISTEP_HISTORY
+            key = :Pressure
+            println("*** [DEBUG] Using linear combo as guess. ",
+                    "‖Δ", key, "‖/‖prev‖ = ",
+                    norm(guess[key] .- last_state[key]) / (norm(last_state[key]) + eps()))
+        end
         update_secondary_variables!(sim.storage, sim.model)
     end
 
@@ -558,6 +567,9 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
                     prev_report = step_report
         )
         push!(step_reports, step_report)
+        firstvar = sim.storage.state[:Pressure][1]
+        println("*** [DEBUG] state[Pressure][1] = ", firstvar,
+                ", previous_state = ", sim.storage.previous_state[:Pressure][1])
         if haskey(step_report, :failure_exception)
             inner_exception = step_report[:failure_exception]
             if cfg[:info_level] > 0
@@ -596,11 +608,13 @@ function solve_ministep(sim, dt, forces, max_iter, cfg;
         if done
             push!(sim.storage[:ministates],
                 deepcopy(get_output_state(sim.storage, sim.model)))
+                println("1*** [DEBUG] push! ministate: buffer=", length(sim.storage[:ministates]))
             if length(sim.storage[:ministates]) > MAX_MINISTEP_HISTORY
                 popfirst!(sim.storage[:ministates])
             end
-            @info "Ministate buffer size = $(length(sim.storage[:ministates]))"
+            @info "*** Ministate buffer size = $(length(storage[:ministates]))"
         end
+        println("2*** [DEBUG] push! ministate: buffer=", length(sim.storage[:ministates]))
     #-----------------------------------------------------------------------
     
     return (done, report)
